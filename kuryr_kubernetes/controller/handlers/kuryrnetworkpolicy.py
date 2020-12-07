@@ -48,8 +48,13 @@ class KuryrNetworkPolicyHandler(k8s_base.ResourceEventHandler):
             specific_driver='multi_pool')
         self._drv_vif_pool.set_vif_driver()
         self._drv_pod_sg = drivers.PodSecurityGroupsDriver.get_instance()
-        self._drv_svc_sg = drivers.ServiceSecurityGroupsDriver.get_instance()
-        self._drv_lbaas = drivers.LBaaSDriver.get_instance()
+        try:
+            self._drv_svc_sg = (
+                drivers.ServiceSecurityGroupsDriver.get_instance())
+            self._drv_lbaas = drivers.LBaaSDriver.get_instance()
+        except Exception:
+            if self._is_service_policy_enabled():
+                pass
 
         self._convert_old_crds()
 
@@ -210,7 +215,8 @@ class KuryrNetworkPolicyHandler(k8s_base.ResourceEventHandler):
         policy = self._get_networkpolicy(knp['metadata']['annotations']
                                          ['networkPolicyLink'])
         if (pods_to_update and CONF.octavia_defaults.enforce_sg_rules and
-                not self._is_egress_only_policy(policy)):
+                not self._is_egress_only_policy(policy) and
+                self._is_service_policy_enabled()):
             # NOTE(ltomasbo): only need to change services if the pods that
             # they point to are updated
             services = driver_utils.get_services(knp['metadata']['namespace'])
@@ -330,3 +336,7 @@ class KuryrNetworkPolicyHandler(k8s_base.ResourceEventHandler):
             self.k8s.remove_finalizer(policy,
                                       constants.NETWORKPOLICY_FINALIZER)
         self.k8s.remove_finalizer(knp, constants.NETWORKPOLICY_FINALIZER)
+
+    def _is_service_policy_enabled(self):
+        enabled_handlers = CONF.kubernetes.enabled_handlers
+        return ('policy' in enabled_handlers and 'service' in enabled_handlers)
