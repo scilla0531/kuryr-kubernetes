@@ -72,7 +72,7 @@ daemon_opts = [
                help=_('Maximum number of consecutive failures of kuryr-daemon '
                       'when processing requests. If this number is exceeded, '
                       'kuryr-daemon will be marked as unhealthy.'),
-               default=3),
+               default=3*50),
 ]
 
 k8s_opts = [

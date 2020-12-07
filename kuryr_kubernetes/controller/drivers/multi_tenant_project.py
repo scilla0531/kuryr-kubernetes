@@ -18,48 +18,28 @@ from oslo_config import cfg
 from kuryr_kubernetes import config
 from kuryr_kubernetes.controller.drivers import base
 from kuryr_kubernetes.controller.drivers import utils as driver_utils
-from kuryr_kubernetes import constants
 
 
-class DefaultPodProjectDriver(base.PodProjectDriver):
-    """Provides project ID for Pod port based on a configuration option."""
+class MultiTenantPodProjectDriver(base.PodProjectDriver):
+    """Get the projectId from the kns.spec.projectId"""
 
     def get_project(self, pod):
         namespace = pod['metadata']['namespace']
         net_crd = driver_utils.get_kuryrnetwork_crds(namespace)
-        return net_crd['spec'].get(constants.K8S_KNS_PROJECT_ID)
+        return net_crd['spec'].get('projectId')
 
 
-class DefaultServiceProjectDriver(base.ServiceProjectDriver):
-    """Provides project ID for Service based on a configuration option."""
+class MultiTenantServiceProjectDriver(base.ServiceProjectDriver):
 
     def get_project(self, service):
         namespace = service['metadata']['namespace']
         net_crd = driver_utils.get_kuryrnetwork_crds(namespace)
-        return net_crd['spec'].get(constants.K8S_KNS_PROJECT_ID)
+        return net_crd['spec'].get('projectId')
 
 
-class DefaultNamespaceProjectDriver(base.NamespaceProjectDriver):
-    """Provides project ID for Namespace based on a configuration option."""
-
-    def get_project(self, namespace):
-        project_id = config.CONF.neutron_defaults.project
-
-        if not project_id:
-            # NOTE(ivc): this option is only required for
-            # DefaultNamespaceProjectDriver and its subclasses, but it may be
-            # optional for other drivers (e.g. when each namespace has own
-            # project)
-            raise cfg.RequiredOptError('project',
-                                       cfg.OptGroup('neutron_defaults'))
-
-        return project_id
-
-
-class DefaultNetworkPolicyProjectDriver(base.NetworkPolicyProjectDriver):
+class MultiTenantNetworkPolicyProjectDriver(base.NetworkPolicyProjectDriver):
 
     def get_project(self, policy):
         namespace = policy['metadata']['namespace']
         net_crd = driver_utils.get_kuryrnetwork_crds(namespace)
-        return net_crd['spec'].get(constants.K8S_KNS_PROJECT_ID)
-
+        return net_crd['spec'].get('projectId')

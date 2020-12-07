@@ -94,19 +94,7 @@ class NeutronPodVIFDriver(base.PodVIFDriver):
         clients.get_network_client().delete_port(vif.id)
 
     def activate_vif(self, vif):
-        if vif.active:
-            return
-
-        os_net = clients.get_network_client()
-        try:
-            port = os_net.get_port(vif.id)
-        except os_exc.SDKException:
-            LOG.debug("Unable to obtain port information, retrying.")
-            raise k_exc.ResourceNotReady(vif)
-
-        if port['status'] != kl_const.PORT_STATUS_ACTIVE:
-            raise k_exc.ResourceNotReady(vif)
-
+        # NOTE(liujinxin) Fixes-Bug:1900780
         vif.active = True
 
     def update_vif_sgs(self, pod, security_groups):

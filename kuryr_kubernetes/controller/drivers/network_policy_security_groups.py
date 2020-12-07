@@ -52,6 +52,7 @@ def _bump_networkpolicy(knp):
             knp['metadata']['annotations']['networkPolicyLink'],
             {constants.K8S_ANNOTATION_POLICY: str(uuid.uuid4())})
     except exceptions.K8sResourceNotFound:
+        LOG.exception("NetworkPolicy not found")
         raise
     except exceptions.K8sClientException:
         LOG.exception("Kubernetes Client Exception")
@@ -290,11 +291,17 @@ def _get_pod_sgs(pod):
 
     # NOTE(maysams) Pods that are not selected by any Networkpolicy
     # are fully accessible. Thus, the default security group is associated.
+    if not sg_list and pod['metadata'].get('annotations') and \
+            pod['metadata'].get('annotations').get(
+                constants.K8S_ANNOTATION_SG_ID):
+        sg_list = [pod['metadata'].get('annotations').get(
+            constants.K8S_ANNOTATION_SG_ID)]
+        LOG.debug("pod annotations of sgId: %s", sg_list)
+
     if not sg_list:
-        sg_list = config.CONF.neutron_defaults.pod_security_groups
-        if not sg_list:
-            raise cfg.RequiredOptError('pod_security_groups',
-                                       cfg.OptGroup('neutron_defaults'))
+        kns_crds = driver_utils.get_kuryrnetwork_crds(pod_namespace)
+        if kns_crds['status'].get('sgId'):
+            sg_list = [kns_crds['status'].get('sgId')]
 
     return sg_list[:]
 
@@ -444,10 +451,7 @@ class NetworkPolicyServiceSecurityGroupsDriver(
             if pods:
                 return _get_pod_sgs(pods[0])
         else:
-            # NOTE(maysams): Network Policy is not enforced on Services
-            # without selectors.
-            sg_list = config.CONF.neutron_defaults.pod_security_groups
-            if not sg_list:
-                raise cfg.RequiredOptError('pod_security_groups',
-                                           cfg.OptGroup('neutron_defaults'))
+            kns_crds = driver_utils.get_kuryrnetwork_crds(svc_namespace)
+            if kns_crds['status'].get('sgId'):
+                sg_list = [kns_crds['status'].get('sgId')]
         return sg_list[:]

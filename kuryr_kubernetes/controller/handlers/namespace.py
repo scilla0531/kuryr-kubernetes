@@ -74,6 +74,7 @@ class NamespaceHandler(k8s_base.ResourceEventHandler):
     def on_present(self, namespace):
         ns_labels = namespace['metadata'].get('labels', {})
         ns_name = namespace['metadata']['name']
+        ns_annotations = namespace['metadata'].get('annotations')
         kns_crd = self._get_kns_crd(ns_name)
         if kns_crd:
             LOG.debug("Previous CRD existing at the new namespace.")
@@ -81,7 +82,7 @@ class NamespaceHandler(k8s_base.ResourceEventHandler):
             return
 
         try:
-            self._add_kuryrnetwork_crd(ns_name, ns_labels)
+            self._add_kuryrnetwork_crd(ns_name, ns_labels, ns_annotations)
         except exceptions.K8sClientException:
             LOG.exception("Kuryrnetwork CRD creation failed.")
             raise exceptions.ResourceNotReady(namespace)
@@ -118,10 +119,9 @@ class NamespaceHandler(k8s_base.ResourceEventHandler):
             raise
         return kuryrnetwork_crd
 
-    def _add_kuryrnetwork_crd(self, namespace, ns_labels):
-        project_id = self._drv_project.get_project(namespace)
+    def _add_kuryrnetwork_crd(self, namespace, ns_labels, ns_annotations=None):
         kubernetes = clients.get_kubernetes_client()
-
+        project_id = None
         kns_crd = {
             'apiVersion': 'openstack.org/v1',
             'kind': 'KuryrNetwork',
@@ -131,10 +131,46 @@ class NamespaceHandler(k8s_base.ResourceEventHandler):
             },
             'spec': {
                 'nsName': namespace,
-                'projectId': project_id,
                 'nsLabels': ns_labels,
             }
         }
+
+        if ns_annotations and \
+                ns_annotations.get(constants.K8S_ANNOTATION_SUBNET_ID) and \
+                ns_annotations.get(constants.K8S_ANNOTATION_ROUTER_ID):
+            subnet_id = ns_annotations.get(constants.K8S_ANNOTATION_SUBNET_ID)
+            router_id = ns_annotations.get(constants.K8S_ANNOTATION_ROUTER_ID)
+            os_net = clients.get_network_client()
+            try:
+                n_subnet = os_net.get_subnet(subnet_id)
+                n_network = os_net.get_network(n_subnet.network_id)
+                project_id = n_network.project_id
+                if ns_annotations.get(constants.K8S_ANNOTATION_SG_ID):
+                    sg_id = ns_annotations.get(constants.K8S_ANNOTATION_SG_ID)
+                else:
+                    security_groups = os_net.security_groups(
+                        project_id=project_id, name='default')
+                    LOG.debug("get sg_id: %s", security_groups)
+                    sg_ids = {sg.get('id') for sg in security_groups}
+                    sg_id = sg_ids.pop()
+
+                status = {'netId': n_subnet['network_id'],
+                          'subnetId': subnet_id,
+                          'subnetCIDR': n_subnet['cidr'],
+                          'routerId': router_id,
+                          'sgId': sg_id}
+                kns_crd['status'] = status
+                kns_crd['spec']['is_tenant'] = True
+
+            except Exception as e:
+                LOG.exception("Get resources by subnetId(%s) failed! %s",
+                              subnet_id, e)
+                project_id = None
+        if not project_id:
+            project_id = self._drv_project.get_project(namespace)
+
+        kns_crd['spec']['projectId'] = project_id
+
         try:
             kubernetes.post('{}/{}/kuryrnetworks'.format(
                 constants.K8S_API_CRD_NAMESPACES, namespace), kns_crd)

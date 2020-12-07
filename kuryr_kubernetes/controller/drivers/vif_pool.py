@@ -582,55 +582,187 @@ class NeutronVIFPool(BaseVIFPool):
         return pod['spec']['nodeName']
 
     def _get_port_from_pool(self, pool_key, pod, subnets, security_groups):
-        try:
-            pool_ports = self._available_ports_pools[pool_key]
-        except (KeyError, AttributeError):
-            raise exceptions.ResourceNotReady(pod)
-        try:
-            port_id = pool_ports[security_groups].pop()
-        except (KeyError, IndexError):
-            # Get another port from the pool and update the SG to the
-            # appropriate one. It uses a port from the group that was updated
-            # longer ago
-            pool_updates = self._last_update.get(pool_key, {})
-            if not pool_updates:
-                # No pools update info. Selecting a random one
-                for sg_group, ports in list(pool_ports.items()):
-                    if len(ports) > 0:
-                        port_id = pool_ports[sg_group].pop()
-                        break
+        LOG.debug("pool_key:%s, security_groups:%s, available_ports_pools:%s",
+                  pool_key, security_groups, self._available_ports_pools)
+
+        port_id = self._create_port_with_specify_netinfo(
+            pool_key, pod, subnets, security_groups)
+
+        if not port_id:
+            try:
+                pool_ports = self._available_ports_pools[pool_key]
+            except (KeyError, AttributeError):
+                raise exceptions.ResourceNotReady(pod)
+            try:
+                port_id = pool_ports[security_groups].pop()
+            except (KeyError, IndexError):
+                # Get another port from the pool and update the SG to the
+                # appropriate one. It uses a port from the group that
+                # was updated longer ago
+                pool_updates = self._last_update.get(pool_key, {})
+                if not pool_updates:
+                    # No pools update info. Selecting a random one
+                    for sg_group, ports in list(pool_ports.items()):
+                        if len(ports) > 0:
+                            port_id = pool_ports[sg_group].pop()
+                            break
+                    else:
+                        raise exceptions.ResourceNotReady(pod)
                 else:
-                    raise exceptions.ResourceNotReady(pod)
-            else:
-                min_date = -1
-                for sg_group, date in list(pool_updates.items()):
-                    if pool_ports.get(sg_group):
-                        if min_date == -1 or date < min_date:
-                            min_date = date
-                            min_sg_group = sg_group
-                if min_date == -1:
-                    # pool is empty, no port to reuse
-                    raise exceptions.ResourceNotReady(pod)
-                port_id = pool_ports[min_sg_group].pop()
-            os_net = clients.get_network_client()
-            os_net.update_port(port_id, security_groups=list(security_groups))
+                    min_date = -1
+                    for sg_group, date in list(pool_updates.items()):
+                        if pool_ports.get(sg_group):
+                            if min_date == -1 or date < min_date:
+                                min_date = date
+                                min_sg_group = sg_group
+                    if min_date == -1:
+                        # pool is empty, no port to reuse
+                        raise exceptions.ResourceNotReady(pod)
+                    port_id = pool_ports[min_sg_group].pop()
+                os_net = clients.get_network_client()
+                os_net.update_port(port_id,
+                                   security_groups=list(security_groups))
+
+            # Only namespace-specified networks are cached
+            # check if the pool needs to be populated
+            if (self._get_pool_size(pool_key) <
+                    oslo_cfg.CONF.vif_pool.ports_pool_min):
+                eventlet.spawn(self._populate_pool, pool_key, pod, subnets,
+                               security_groups)
+
         if config.CONF.kubernetes.port_debug:
             os_net = clients.get_network_client()
             os_net.update_port(port_id, name=c_utils.get_port_name(pod),
                                device_id=pod['metadata']['uid'])
-        # check if the pool needs to be populated
-        if (self._get_pool_size(pool_key) <
-                oslo_cfg.CONF.vif_pool.ports_pool_min):
-            eventlet.spawn(self._populate_pool, pool_key, pod, subnets,
-                           security_groups)
-        # Add protection from port_id not in existing_vifs
+        LOG.debug("ended! get port id :%s", self._existing_vifs[port_id])
+        return self._existing_vifs[port_id]
+
+    def _is_create_pod_with_specify_netinfo(self, pod):
+        pod_annotations = pod['metadata'].get('annotations')
+        if not pod_annotations:
+            return False
+
+        if pod_annotations.get(constants.K8S_ANNOTATION_SUBNET_ID) or \
+                pod_annotations.get(constants.K8S_ANNOTATION_SG_ID) or \
+                pod_annotations.get(constants.K8S_ANNOTATION_FIXED_IP):
+            return True
+
+        return False
+
+    def _create_port_with_specify_netinfo(self, pool_key,
+                                           pod, subnets, security_groups):
+        if not self._is_create_pod_with_specify_netinfo(pod):
+            return None
+
+        port_id = self._get_port_from_pool_with_fixip(
+            pool_key, pod, subnets, security_groups)
+        if not port_id:
+            port_id = self._create_port_directly(
+                pool_key, pod, subnets, security_groups)
+        return port_id
+
+    def _create_port_directly(self, pool_key, pod, subnets, security_groups):
+        vifs = self._drv_vif.request_vifs(
+            pod=pod,
+            project_id=pool_key[1],
+            subnets=subnets,
+            security_groups=security_groups,
+            num_ports=1)
+        port_id = vifs[0].id
+        LOG.debug("create port directly vifs:%s", vifs)
+        self._existing_vifs[port_id] = vifs[0]
+        return port_id
+
+    def _get_port_from_pool_with_fixip(self, pool_key, pod, subnets,
+                                       security_groups):
+        """Search order.
+
+        1. Search the available Ports Pool and return to the port that
+        matches the double key and portId.
+        2. If port exists in available Ports Pool but the double keys are
+        inconsistent, delete and rebuild port.
+        3. Create port is not in the available Ports Pool.
+        """
+        fixed_ips = ovu.osvif_to_neutron_fixed_ips(subnets)
+        for fixed_ip_info in fixed_ips:
+            LOG.debug("fixed_ip_info:%s", fixed_ip_info)
+            fixed_ip = fixed_ip_info.get('ip_address')
+            subnet_id = fixed_ip_info.get('subnet_id')
+            if fixed_ip:
+                ports = self._get_fixedip_port(subnet_id, fixed_ip)
+                for port in ports:
+                    LOG.debug("find neutron port: %s", port.id)
+                    # if port in the port pool, delete and create
+                    port_id = port.id
+
+                    try:
+                        pool_ports = self._available_ports_pools[pool_key]
+                    except (KeyError, AttributeError):
+                        pass
+                    try:
+                        port_list = pool_ports[security_groups]
+                        if port_id in port_list:
+                            LOG.debug("match port(%s) from "
+                                      "available ports pools", port_id)
+                            port_list.remove(port_id)
+                            return port_id
+                    except Exception as e:
+                        LOG.debug("get port from pool by fixed ip failed! %s",
+                                  e)
+
+                    try:
+                        for key, pool_ports in \
+                                self._available_ports_pools.items():
+                            LOG.debug("pool_ports:%s", pool_ports)
+                            for key, port_list in pool_ports.items():
+                                if port_id in port_list:
+                                    port_list.remove(port_id)
+                                    LOG.debug("get neutron port from alailable"
+                                              "ports pool port_id:%s", port_id)
+                    except (KeyError, AttributeError):
+                        pass
+
+                    self._delete_fixedip_port(port_id)
+
+                try:
+                    vifs = self._drv_vif.request_vifs(
+                        pod=pod,
+                        project_id=pool_key[1],
+                        subnets=subnets,
+                        security_groups=security_groups,
+                        num_ports=1)
+                    port_id = vifs[0].id
+                    LOG.debug("create neutron vifs:%s", vifs)
+                    self._existing_vifs[port_id] = vifs[0]
+                except exceptions as exc:
+                    LOG.exception("Failed to create Neutron port with "
+                                  "FixedIP exc:%s", exc)
+                    raise exceptions.ResourceNotReady(pod)
+
+                return port_id
+        return None
+
+    def _get_fixedip_port(self, subnet_id, ip):
+        os_net = clients.get_network_client()
         try:
-            port = self._existing_vifs[port_id]
-        except KeyError:
-            LOG.debug('Missing port on existing_vifs, this should not happen.'
-                      ' Retrying.')
-            raise exceptions.ResourceNotReady(pod)
-        return port
+            fixed_ips = ['subnet_id=%s' % str(subnet_id),
+                         'ip_address=%s' % str(ip)]
+            ports = os_net.ports(fixed_ips=fixed_ips)
+        except os_exc.SDKException:
+            LOG.debug("Port with fixed ips %s not found!", fixed_ips)
+
+        return ports
+
+    def _delete_fixedip_port(self, port_id):
+        os_net = clients.get_network_client()
+        try:
+            os_net.delete_port(port_id)
+
+        except os_exc.SDKException:
+            LOG.error("Port(%s) delete failed!", port_id)
+            raise
+
+        return None
 
     def _return_ports_to_pool(self):
         """Recycle ports to be reused by future pods.
@@ -655,6 +787,7 @@ class NeutronVIFPool(BaseVIFPool):
 
     @lockutils.synchronized('return_to_pool_baremetal')
     def _trigger_return_to_pool(self):
+        # NOTE(liujinxin): Delete resources directly, without recycling
         if not self._recovered_pools:
             LOG.debug("Kuryr-controller not yet ready to return ports to "
                       "pools.")
@@ -673,30 +806,12 @@ class NeutronVIFPool(BaseVIFPool):
                         port.security_group_ids))
 
         for port_id, pool_key in list(self._recyclable_ports.items()):
-            if (not oslo_cfg.CONF.vif_pool.ports_pool_max or
-                self._get_pool_size(pool_key) <
-                    oslo_cfg.CONF.vif_pool.ports_pool_max):
-                port_name = (constants.KURYR_PORT_NAME
-                             if config.CONF.kubernetes.port_debug
-                             else '')
-                if config.CONF.kubernetes.port_debug:
-                    try:
-                        os_net.update_port(port_id, name=port_name,
-                                           device_id='')
-                    except os_exc.SDKException:
-                        LOG.warning("Error changing name for port %s to be "
-                                    "reused, put back on the cleanable "
-                                    "pool.", port_id)
-                        continue
-                self._available_ports_pools.setdefault(
-                    pool_key, {}).setdefault(
-                        sg_current.get(port_id), []).append(port_id)
-            else:
-                try:
-                    del self._existing_vifs[port_id]
-                    os_net.delete_port(port_id)
-                except KeyError:
-                    LOG.debug('Port %s is not in the ports list.', port_id)
+            LOG.debug("delete port(%s) directly, without recycling.", port_id)
+            try:
+                del self._existing_vifs[port_id]
+                os_net.delete_port(port_id)
+            except KeyError:
+                LOG.debug('Port %s is not in the ports list.', port_id)
             try:
                 del self._recyclable_ports[port_id]
             except KeyError:
@@ -769,8 +884,9 @@ class NeutronVIFPool(BaseVIFPool):
         # that dict before cleaning it up
         self._trigger_return_to_pool()
         for pool_key, ports in list(self._available_ports_pools.items()):
-            if self._get_pool_key_net(pool_key) != net_id:
-                continue
+            # NOTE(liujinxin): fix for this ns use more than one VPC Network
+            # if self._get_pool_key_net(pool_key) != net_id:
+            #     continue
             ports_id = []
             for sg_ports in ports.values():
                 ports_id.extend(sg_ports)
@@ -939,7 +1055,7 @@ class NestedVIFPool(BaseVIFPool):
                         subport.security_group_ids))
 
         for port_id, pool_key in list(self._recyclable_ports.items()):
-            if (not oslo_cfg.CONF.vif_pool.ports_pool_max or
+            if (oslo_cfg.CONF.vif_pool.ports_pool_max and
                 self._get_pool_size(pool_key) <
                     oslo_cfg.CONF.vif_pool.ports_pool_max):
                 port_name = (constants.KURYR_PORT_NAME

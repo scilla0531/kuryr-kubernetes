@@ -17,24 +17,37 @@ from oslo_config import cfg
 from oslo_log import log as logging
 
 from kuryr_kubernetes import config
+from kuryr_kubernetes import constants
 from kuryr_kubernetes.controller.drivers import base
+from kuryr_kubernetes.controller.drivers import utils as driver_utils
 
 LOG = logging.getLogger(__name__)
 
 
 class DefaultPodSecurityGroupsDriver(base.PodSecurityGroupsDriver):
-    """Provides security groups for Pod based on a configuration option."""
+    """Provides security groups for Pod
+
+    based on a configuration option only when kns creates and does not
+    specify a tenant network .
+    """
 
     def get_security_groups(self, pod, project_id):
-        sg_list = config.CONF.neutron_defaults.pod_security_groups
+        # Get sgid from conf only if kns creates and does not specify a
+        # tenant network.
+        if pod:
+            namespace = pod['metadata']['namespace']
+            net_crd = driver_utils.get_kuryrnetwork_crds(namespace)
+            sg_list = net_crd['spec'].get(constants.K8S_KNS_SGID)
+        else:
+            sg_list = config.CONF.neutron_defaults.pod_security_groups
 
-        if not sg_list:
-            # NOTE(ivc): this option is only required for
-            # Default{Pod,Service}SecurityGroupsDriver and its subclasses,
-            # but it may be optional for other drivers (e.g. when each
-            # namespace has own set of security groups)
-            raise cfg.RequiredOptError('pod_security_groups',
-                                       cfg.OptGroup('neutron_defaults'))
+            if not sg_list:
+                # NOTE(ivc): this option is only required for
+                # Default{Pod,Service}SecurityGroupsDriver and its subclasses,
+                # but it may be optional for other drivers (e.g. when each
+                # namespace has own set of security groups)
+                raise cfg.RequiredOptError('pod_security_groups',
+                                           cfg.OptGroup('neutron_defaults'))
 
         return sg_list[:]
 
@@ -64,18 +77,27 @@ class DefaultPodSecurityGroupsDriver(base.PodSecurityGroupsDriver):
 
 
 class DefaultServiceSecurityGroupsDriver(base.ServiceSecurityGroupsDriver):
-    """Provides security groups for Service based on a configuration option."""
+    """Provides security groups for Service
+
+    based on a configuration option only when kns creates and does not
+    specify a tenant network .
+    """
 
     def get_security_groups(self, service, project_id):
-        # NOTE(ivc): use the same option as DefaultPodSecurityGroupsDriver
-        sg_list = config.CONF.neutron_defaults.pod_security_groups
+        if service:
+            namespace = service['metadata']['namespace']
+            net_crd = driver_utils.get_kuryrnetwork_crds(namespace)
+            sg_list = net_crd['spec'].get(constants.K8S_KNS_SGID)
+        else:
+            # NOTE(ivc): use the same option as DefaultPodSecurityGroupsDriver
+            sg_list = config.CONF.neutron_defaults.pod_security_groups
 
-        if not sg_list:
-            # NOTE(ivc): this option is only required for
-            # Default{Pod,Service}SecurityGroupsDriver and its subclasses,
-            # but it may be optional for other drivers (e.g. when each
-            # namespace has own set of security groups)
-            raise cfg.RequiredOptError('pod_security_groups',
-                                       cfg.OptGroup('neutron_defaults'))
+            if not sg_list:
+                # NOTE(ivc): this option is only required for
+                # Default{Pod,Service}SecurityGroupsDriver and its subclasses,
+                # but it may be optional for other drivers (e.g. when each
+                # namespace has own set of security groups)
+                raise cfg.RequiredOptError('pod_security_groups',
+                                           cfg.OptGroup('neutron_defaults'))
 
         return sg_list[:]

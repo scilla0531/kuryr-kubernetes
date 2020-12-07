@@ -130,7 +130,8 @@ class NetworkPolicyDriver(base.NetworkPolicyDriver):
         """
         i_rules, e_rules = self.parse_network_policy_rules(policy)
         # Add default rules to allow traffic from host and svc subnet
-        i_rules += self._get_default_np_rules()
+        # NOTE(liujinxin) for disabled svc policy
+        # i_rules += self._get_default_np_rules()
 
         return i_rules, e_rules
 

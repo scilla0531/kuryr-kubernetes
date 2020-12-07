@@ -96,19 +96,20 @@ class KuryrNetworkHandler(k8s_base.ResourceEventHandler):
         if net_id:
             self._drv_vif_pool.delete_network_pools(
                 kuryrnet_crd['status']['netId'])
-            try:
-                self._drv_subnets.delete_namespace_subnet(kuryrnet_crd)
-            except k_exc.ResourceNotReady:
-                LOG.debug("Subnet is not ready to be removed.")
-                # TODO(ltomasbo): Once KuryrPort CRDs is supported, we should
-                # execute a delete network ports method here to remove the
-                # ports associated to the namespace/subnet, ensuring next
-                # retry will be successful
-                raise
+            if not kuryrnet_crd['spec'].get('is_tenant'):
+                try:
+                    self._drv_subnets.delete_namespace_subnet(kuryrnet_crd)
+                except k_exc.ResourceNotReady:
+                    LOG.debug("Subnet is not ready to be removed.")
+                    # TODO(ltomasbo): Once KuryrPort CRDs is supported,
+                    # we should execute a delete network ports method here to
+                    # remove the ports associated to the namespace/subnet,
+                    # ensuring next retry will be successful
+                    raise
 
-        namespace = {
-            'metadata': {'name': kuryrnet_crd['spec']['nsName']}}
-        crd_selectors = self._drv_sg.delete_namespace_sg_rules(namespace)
+            namespace = {
+                'metadata': {'name': kuryrnet_crd['spec']['nsName']}}
+            crd_selectors = self._drv_sg.delete_namespace_sg_rules(namespace)
 
         if (self._is_network_policy_enabled() and crd_selectors and
                 oslo_cfg.CONF.octavia_defaults.enforce_sg_rules):

@@ -19,12 +19,14 @@ from oslo_log import log as logging
 
 from kuryr_kubernetes import clients
 from kuryr_kubernetes import constants
+from kuryr_kubernetes.controller.drivers import base
 from kuryr_kubernetes.controller.drivers import default_subnet
 from kuryr_kubernetes.controller.drivers import utils as c_utils
 from kuryr_kubernetes import exceptions
 from kuryr_kubernetes import utils
 
 from openstack import exceptions as os_exc
+from os_vif.objects import fixed_ip as osv_fixed_ip
 
 LOG = logging.getLogger(__name__)
 
@@ -45,7 +47,23 @@ class NamespacePodSubnetDriver(default_subnet.DefaultPodSubnetDriver):
 
     def get_subnets(self, pod, project_id):
         pod_namespace = pod['metadata']['namespace']
-        return self.get_namespace_subnet(pod_namespace)
+        annotations = pod['metadata'].get('annotations')
+        fixed_ip = None
+        if annotations and annotations.get(constants.K8S_ANNOTATION_SUBNET_ID):
+            subnet_id = annotations.get(constants.K8S_ANNOTATION_SUBNET_ID)
+            if annotations.get(constants.K8S_ANNOTATION_FIXED_IP):
+                fixed_ip = annotations.get(constants.K8S_ANNOTATION_FIXED_IP)
+        else:
+            subnet_id = self._get_namespace_subnet_id(pod_namespace)
+
+        network = utils.get_subnet(subnet_id)
+        if fixed_ip:
+            for subnet in network.subnets.objects:
+                subnet.ips = osv_fixed_ip.FixedIPList(
+                    objects=[osv_fixed_ip.FixedIP(address=fixed_ip)])
+                LOG.debug("get subnets with fixedIP : %s",
+                          [str(ip.address) for ip in subnet.ips.objects])
+        return {subnet_id: network}
 
     def get_namespace_subnet(self, namespace, subnet_id=None):
         if not subnet_id:
@@ -221,3 +239,13 @@ class NamespacePodSubnetDriver(default_subnet.DefaultPodSubnetDriver):
                           subnet_id)
             raise
         return router_id
+
+
+class NamespaceServiceSubnetDriver(base.ServiceSubnetsDriver):
+    """Provides subnet for Service port based on a Service's namespace."""
+
+    def get_subnets(self, service, project_id):
+        namespace = service['metadata']['namespace']
+
+        net_crd = c_utils.get_kuryrnetwork_crds(namespace)
+        return net_crd['status'].get(constants.K8S_KNS_SVC_SUBNET_ID)

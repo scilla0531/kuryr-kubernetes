@@ -627,3 +627,17 @@ def get_endpoints_targets(name, namespace):
         for endpoint in ep_slice.get('endpoints', []):
             target_ips.extend(endpoint.get('addresses', []))
     return target_ips
+
+
+def get_kuryrnetwork_crds(namespace=None):
+    k8s = clients.get_kubernetes_client()
+    try:
+        kuryrnetwork_crd = k8s.get('{}/{}/kuryrnetworks/{}'.format(
+            constants.K8S_API_CRD_NAMESPACES, namespace,
+            namespace))
+    except k_exc.K8sResourceNotFound:
+        return None
+    except k_exc.K8sClientException:
+        LOG.exception("Kubernetes Client Exception.")
+        raise
+    return kuryrnetwork_crd
